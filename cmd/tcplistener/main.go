@@ -6,60 +6,79 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 )
 
-// Reads lines from a stream and emits them into a channel
-func getLinesFromReader(f io.ReadCloser) <-chan string {
-	out := make(chan string, 1)
+// Convert a readable stream into a channel of strings,
+// where each string represents one line of input.
+func getDataStream(reader io.ReadCloser) <-chan string {
+	dataChannel := make(chan string, 1)
 
 	go func() {
-		defer f.Close()
-		defer close(out)
+		defer reader.Close()
+		defer close(dataChannel)
 
-		str := ""
+		var dataBuffer strings.Builder
+
 		for {
-			data := make([]byte, 8) // read in 8-byte chunks
-			n, err := f.Read(data)
+			// Pull the next chunk of bytes from the stream
+			data := make([]byte, 8)
+			dataRead, err := reader.Read(data)
+
+			// Stop reading if the stream closes or fails
 			if err != nil {
 				break
 			}
 
-			data = data[:n]
-			if i := bytes.IndexByte(data, '\n'); i != -1 {
-				str += string(data[:i])
-				data = data[i+1:]
-				out <- str
-				str = ""
+			// Focus only on the actual bytes read this time
+			data = data[:dataRead]
+
+			// If this chunk includes a new line, that marks the end of a message
+			if dataStream := bytes.IndexByte(data, '\n'); dataStream != -1 {
+				dataBuffer.Write(data[:dataStream]) // complete the line
+				dataChannel <- dataBuffer.String()  // hand it off
+				dataBuffer.Reset()                  // prepare for the next
+				data = data[dataStream+1:]          // keep remainder after newline
 			}
-			str += string(data)
+
+			// Add whatever is left to the current message-in-progress
+			if len(data) > 0 {
+				dataBuffer.Write(data)
+			}
 		}
 
-		if len(str) != 0 {
-			out <- str
+		// If the stream ends mid-line, send the unfinished line too
+		if dataBuffer.Len() != 0 {
+			dataChannel <- dataBuffer.String()
 		}
 	}()
 
-	return out
+	return dataChannel
 }
 
 func main() {
+	// Start a TCP server listening on port 42069
 	listener, err := net.Listen("tcp", ":42069")
 	if err != nil {
-		log.Fatal("error", err)
+		log.Fatal("listener error:", err)
 	}
 	defer listener.Close()
 
 	for {
-		conn, err := listener.Accept()
+		// Accept a new client connection
+		connection, err := listener.Accept()
 		if err != nil {
 			log.Fatal("accept error:", err)
 		}
 
-		go func(c net.Conn) {
-			defer c.Close()
-			for line := range getLinesFromReader(c) {
+		// Spin up a goroutine to handle this client separately
+		go func(connection net.Conn) {
+			defer connection.Close()
+
+			// Print each line received from the client
+			for line := range getDataStream(connection) {
 				fmt.Printf("read: %s\n", line)
 			}
-		}(conn)
+		}(connection)
 	}
 }
